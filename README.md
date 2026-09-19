@@ -1,5 +1,5 @@
 # Douyin Thread Ripper
-
+参照项目 https://github.com/MrTangLuyao/Bilibili-thread-ripper
 Chrome MV3 extension for accelerating Douyin Web while keeping Douyin's native
 player and UI.
 
