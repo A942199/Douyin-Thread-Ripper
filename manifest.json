@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Douyin Thread Ripper",
+  "short_name": "Douyin Ripper",
+  "version": "0.2.3",
+  "description": "Adaptive Douyin media acceleration with validated CDN selection, Range concurrency and SIDX segment prefetch.",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.douyin.com/*",
+    "https://*.douyinvod.com/*"
+  ],
+  "background": {
+    "service_worker": "src/service-worker.js"
+  },
+  "action": {
+    "default_title": "Douyin Thread Ripper",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.douyin.com/*"],
+      "js": [
+        "src/range-core.js",
+        "src/sidx.js",
+        "src/cdn-resolver.js",
+        "src/segment-prefetch.js",
+        "src/fetch-accelerator.js",
+        "src/page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.douyin.com/*"],
+      "js": ["src/bridge.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Douyin Thread Ripper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Douyin Thread Ripper</h1>
+      <p>原生播放器 · CDN / Range / SIDX 自适应加速</p>
+    </header>
+
+    <section class="card settings">
+      <label class="toggle-row"><span>启用加速</span><input id="enabled" type="checkbox"></label>
+      <label class="toggle-row"><span>自适应并发</span><input id="adaptiveConcurrency" type="checkbox"></label>
+      <label class="toggle-row"><span>多 CDN 选择</span><input id="multiCdnEnabled" type="checkbox"></label>
+      <label class="toggle-row"><span>下一 Segment 预取</span><input id="prefetchEnabled" type="checkbox"></label>
+      <label><span>预取段数</span><input id="prefetchSegments" type="number" min="0" max="2" step="1"></label>
+      <label><span>拆分阈值 (KiB)</span><input id="minSplitKiB" type="number" min="64" max="8192" step="64"></label>
+      <label><span>目标子块 (KiB)</span><input id="targetChunkKiB" type="number" min="64" max="2048" step="32"></label>
+      <label><span>最大分片</span><input id="maxPieces" type="number" min="1" max="3" step="1"></label>
+      <label><span>全局并发</span><input id="globalConcurrency" type="number" min="1" max="12" step="1"></label>
+      <label><span>超时 (ms)</span><input id="timeoutMs" type="number" min="1000" max="30000" step="500"></label>
+      <label><span>瞬时失败重试</span><input id="maxRetries" type="number" min="0" max="2" step="1"></label>
+      <label class="toggle-row"><span>调试日志</span><input id="debug" type="checkbox"></label>
+    </section>
+
+    <section class="card stats">
+      <div class="status-line">
+        <span class="dot" id="statusDot"></span>
+        <strong id="statusText">等待抖音页面...</strong>
+      </div>
+      <dl>
+        <div><dt>命中 Range</dt><dd id="matched">0</dd></div>
+        <div><dt>已并发加速</dt><dd id="accelerated">0</dd></div>
+        <div><dt>策略 Native / 2 / 3</dt><dd id="strategies">0 / 0 / 0</dd></div>
+        <div><dt>候选 CDN / Host</dt><dd id="candidates">0 / 0</dd></div>
+        <div><dt>已验证备用 CDN</dt><dd id="verifiedCdn">0</dd></div>
+        <div><dt>预取命中</dt><dd id="prefetchHits">0</dd></div>
+        <div><dt>SIDX / XHR 索引</dt><dd id="sidxIndexes">0 / 0</dd></div>
+        <div><dt>预取缓存</dt><dd id="prefetchCache">0 B</dd></div>
+        <div><dt>原生回退</dt><dd id="fallbacks">0</dd></div>
+        <div><dt>子请求</dt><dd id="subrequests">0</dd></div>
+        <div><dt>已加速数据</dt><dd id="bytes">0 B</dd></div>
+      </dl>
+      <p id="last">暂无媒体请求</p>
+      <button id="resetStats" type="button">清空统计</button>
+      <button id="clearCaches" type="button">清空预取缓存</button>
+    </section>
+
+    <footer id="saveState">设置自动保存</footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

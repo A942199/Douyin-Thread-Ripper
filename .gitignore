@@ -1,0 +1,23 @@
+# Local captures and credentials
+*.har
+*.har.gz
+.env
+.env.*
+!.env.example
+
+# Dependencies / generated output
+node_modules/
+coverage/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
