@@ -5,6 +5,12 @@ player and UI.
 
 ## Install
 
+Packaged build: [Douyin-Thread-Ripper-v0.2.3.zip](dist/Douyin-Thread-Ripper-v0.2.3.zip)
+
+For the packaged build, unzip it first, then load the extracted directory with
+Chrome's **Load unpacked** button. Chrome does not load this ZIP directly as an
+installed extension.
+
 1. Clone or download this repository.
 2. Open `chrome://extensions/` in Chrome.
 3. Enable Developer mode.
