@@ -50,16 +50,20 @@
     return true;
   }
 
-  function parseContentRangeTotal(value) {
+  function parseContentRange(value) {
     if (typeof value !== "string") {
       return null;
     }
-    var match = /^\s*bytes\s+\d+-\d+\/(\d+)\s*$/i.exec(value);
+    var match = /^\s*bytes\s+(\d+)-(\d+)\/(\d+)\s*$/i.exec(value);
     if (!match) {
       return null;
     }
-    var total = Number(match[1]);
-    return Number.isSafeInteger(total) ? total : null;
+    var start = Number(match[1]);
+    var end = Number(match[2]);
+    var total = Number(match[3]);
+    return Number.isSafeInteger(start) && Number.isSafeInteger(end) &&
+      Number.isSafeInteger(total) && start <= end && end < total
+      ? { start: start, end: end, total: total } : null;
   }
 
   function ewma(previous, next, alpha) {
@@ -83,6 +87,9 @@
     var pathToGroups = new Map();
     var health = new Map();
     var validations = new Map();
+    var MAX_GROUPS = 256;
+    var MAX_CANDIDATES_PER_GROUP = 32;
+    var MAX_VALIDATIONS = 2048;
 
     var stats = {
       metadataGroups: 0,
@@ -138,6 +145,21 @@
       set.add(key);
     }
 
+    function removePathMapping(path, key) {
+      var set = pathToGroups.get(path);
+      if (!set) return;
+      set.delete(key);
+      if (!set.size) pathToGroups.delete(path);
+    }
+
+    function setValidation(key, value) {
+      validations.delete(key);
+      validations.set(key, value);
+      while (validations.size > MAX_VALIDATIONS) {
+        validations.delete(validations.keys().next().value);
+      }
+    }
+
     function rawCandidateUrl(value) {
       if (typeof value === "string") {
         return value;
@@ -181,6 +203,9 @@
           candidates: new Map()
         };
         groups.set(key, group);
+      } else {
+        groups.delete(key);
+        groups.set(key, group);
       }
 
       filtered.forEach(function (value) {
@@ -193,7 +218,25 @@
           });
         }
         addPathMapping(parsed.pathname, key);
+        while (group.candidates.size > MAX_CANDIDATES_PER_GROUP) {
+          var oldestUrl = group.candidates.keys().next().value;
+          var removed = group.candidates.get(oldestUrl);
+          group.candidates.delete(oldestUrl);
+          var stillHasPath = Array.from(group.candidates.values()).some(function (candidate) {
+            return candidate.path === removed.path;
+          });
+          if (!stillHasPath) removePathMapping(removed.path, key);
+        }
       });
+
+      while (groups.size > MAX_GROUPS) {
+        var oldestKey = groups.keys().next().value;
+        var oldestGroup = groups.get(oldestKey);
+        oldestGroup.candidates.forEach(function (candidate) {
+          removePathMapping(candidate.path, oldestKey);
+        });
+        groups.delete(oldestKey);
+      }
     }
 
     function observeMetadata(payload) {
@@ -301,11 +344,6 @@
       if (!primary || !isDouyinVodHost(primary.hostname)) {
         return;
       }
-      validations.set(primary.href, {
-        status: "verified",
-        checkedAt: Date.now(),
-        primary: true
-      });
       if (!health.has(primary.hostname)) {
         health.set(primary.hostname, {
           samples: 0,
@@ -361,7 +399,7 @@
         }
 
         if (verifiedOnly) {
-          var state = validations.get(value);
+          var state = validations.get(JSON.stringify([primary.href, value]));
           if (!state || state.status !== "verified") {
             return false;
           }
@@ -417,12 +455,13 @@
 
         var body = new Uint8Array(await response.arrayBuffer());
         var ended = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
-        var total = parseContentRangeTotal(response.headers.get("content-range"));
-        var expectedLength = total === null
-          ? probeBytes
-          : Math.max(0, Math.min(probeBytes, total - offset));
+        var contentRange = parseContentRange(response.headers.get("content-range"));
+        var total = contentRange && contentRange.total;
+        var expectedLength = total === null ? 0 : Math.max(0, Math.min(probeBytes, total - offset));
 
-        if (!body.byteLength || body.byteLength !== expectedLength) {
+        if (!contentRange || contentRange.start !== offset ||
+            contentRange.end !== offset + expectedLength - 1 ||
+            !body.byteLength || body.byteLength !== expectedLength) {
           throw new Error("Candidate probe returned unexpected byte length");
         }
 
@@ -446,7 +485,8 @@
         return true;
       }
 
-      var existing = validations.get(candidateUrl);
+      var validationKey = JSON.stringify([new URL(primaryUrl).href, new URL(candidateUrl).href]);
+      var existing = validations.get(validationKey);
       if (existing && existing.status === "verified") {
         return true;
       }
@@ -454,7 +494,7 @@
         if (Date.now() - Number(existing.checkedAt || 0) < rejectCooldownMs) {
           return false;
         }
-        validations.delete(candidateUrl);
+        validations.delete(validationKey);
         existing = null;
       }
       if (existing && existing.promise) {
@@ -501,7 +541,7 @@
             }
           }
 
-          validations.set(candidateUrl, {
+          setValidation(validationKey, {
             status: "verified",
             checkedAt: Date.now(),
             primary: false
@@ -515,7 +555,7 @@
           });
           return true;
         } catch (_) {
-          validations.set(candidateUrl, {
+          setValidation(validationKey, {
             status: "rejected",
             checkedAt: Date.now(),
             primary: false
@@ -526,7 +566,7 @@
         }
       })();
 
-      validations.set(candidateUrl, {
+      setValidation(validationKey, {
         status: "pending",
         checkedAt: Date.now(),
         promise: promise

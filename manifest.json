@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Douyin Thread Ripper",
   "short_name": "Douyin Ripper",
-  "version": "0.2.3",
+  "version": "0.2.7",
   "description": "Adaptive Douyin media acceleration with validated CDN selection, Range concurrency and SIDX segment prefetch.",
   "minimum_chrome_version": "114",
   "permissions": [

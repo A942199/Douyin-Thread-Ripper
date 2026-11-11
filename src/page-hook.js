@@ -51,7 +51,7 @@
 
   function isDouyinVodUrl(value) {
     try {
-      return window.DTRRangeCore.isDouyinVodHost(new URL(value).hostname);
+      return window.DTRRangeCore.isDouyinMediaUrl(value);
     } catch (_) {
       return false;
     }

@@ -190,6 +190,18 @@ async function testAcceleratedRange() {
   assert.equal(stats.bytesAccelerated, end - start + 1);
 }
 
+async function testPostRequestBodyPassesThrough() {
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) { return new Response(await request.text()); },
+    config: baseConfig()
+  });
+  var request = new Request("https://www.douyin.com/example", {
+    method: "POST", body: "payload"
+  });
+  var response = await accelerator.fetch(request);
+  assert.equal(await response.text(), "payload");
+}
+
 async function testSmallRangeBypasses() {
   var fixture = makeFixture();
   var accelerator = acceleratorApi.createFetchAccelerator({
@@ -350,6 +362,10 @@ async function testSidxNextSegmentPrefetchServesCache() {
 
     await delay(5, request.signal);
 
+    if (request.headers.has("if-range")) {
+      return new Response(fixtureMedia, { status: 200 });
+    }
+
     var bytes = fixtureMedia.slice(range.start, range.end + 1);
     return new Response(bytes, {
       status: 206,
@@ -407,6 +423,16 @@ async function testSidxNextSegmentPrefetchServesCache() {
   );
 
   var beforeSecondDemand = calls.length;
+  var conditional = await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=164-363", "If-Range": '"old-version"' }
+  }));
+  assert.equal(conditional.status, 200, "conditional ranges must retain native response semantics");
+  beforeSecondDemand = calls.length;
+  var aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=164-363" }, signal: aborted.signal
+  })), { name: "AbortError" });
   var secondResponse = await accelerator.fetch(new Request(url, {
     headers: { Range: "bytes=164-363" }
   }));
@@ -474,6 +500,276 @@ async function testObservedMediaIndexStartsPrefetch() {
 
   assert.equal(fixture.calls.length, callsBeforeHit);
   assert.ok(accelerator.getStats().prefetchHits >= 1);
+}
+
+async function testAbortWhileJoiningPrefetch() {
+  var fixture = makeFixture({ delayMs: 5 });
+  var started;
+  var prefetchStarted = new Promise(function (resolve) { started = resolve; });
+  var release;
+  var gate = new Promise(function (resolve) { release = resolve; });
+  var nextStart;
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      if (range.start === nextStart) {
+        started();
+        await gate;
+      }
+      return fixture.fetch(request);
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0, prefetchWaitMs: 1000 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/abort-join";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  var first = index.segments[0];
+  var second = index.segments[1];
+  nextStart = second.start;
+  await (await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  await prefetchStarted;
+  var controller = new AbortController();
+  var demand = accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + second.start + "-" + second.end }, signal: controller.signal
+  }));
+  controller.abort();
+  await assert.rejects(demand, { name: "AbortError" });
+  release();
+  await delay(30);
+  var callsBeforeHit = fixture.calls.length;
+  var hit = await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + second.start + "-" + second.end }
+  }));
+  assert.deepEqual(new Uint8Array(await hit.arrayBuffer()), media.slice(second.start, second.end + 1));
+  assert.equal(fixture.calls.length, callsBeforeHit, "aborting the consumer must not cancel shared prefetch");
+}
+
+async function testPrefetchDoesNotCrossUrlVariants() {
+  var calls = [];
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      var variant = new URL(request.url).searchParams.get("variant");
+      calls.push(variant);
+      return new Response(new Uint8Array(range.length).fill(variant === "a" ? 1 : 2), {
+        status: 206, headers: { "content-range": "bytes " + range.start + "-" + range.end + "/10000" }
+      });
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/shared-path?variant=";
+  var index = accelerator.observeMediaIndex(url + "a", "bytes=0-63", new Uint8Array(makeSidx()));
+  var first = index.segments[0];
+  var second = index.segments[1];
+  await (await accelerator.fetch(new Request(url + "a", {
+    headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  await delay(30);
+  var response = await accelerator.fetch(new Request(url + "b", {
+    headers: { Range: "bytes=" + second.start + "-" + second.end }
+  }));
+  assert.ok(new Uint8Array(await response.arrayBuffer()).every(function (value) { return value === 2; }),
+    "different URL variants must not share prefetched bytes");
+  assert.ok(calls.includes("b"));
+}
+
+async function testPrefetchDoesNotCrossRequestHeaders() {
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      var variant = request.headers.get("x-variant");
+      return new Response(new Uint8Array(range.length).fill(variant === "a" ? 1 : 2), {
+        status: 206, headers: { "content-range": "bytes " + range.start + "-" + range.end + "/10000" }
+      });
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/header-variant";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  var first = index.segments[0];
+  var second = index.segments[1];
+  await (await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + first.start + "-" + first.end, "X-Variant": "a" }
+  }))).arrayBuffer();
+  await delay(30);
+  var response = await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + second.start + "-" + second.end, "X-Variant": "b" }
+  }));
+  assert.ok(new Uint8Array(await response.arrayBuffer()).every(function (value) { return value === 2; }),
+    "requests with different headers must not share prefetched bytes");
+}
+
+async function testNoStoreRequestSkipsPrefetchCache() {
+  var fixture = makeFixture({ delayMs: 5 });
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: fixture.fetch,
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/no-store";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  var first = index.segments[0];
+  var second = index.segments[1];
+  await (await accelerator.fetch(new Request(url, {
+    cache: "no-store", headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  await delay(30);
+  await (await accelerator.fetch(new Request(url, {
+    cache: "no-store", headers: { Range: "bytes=" + second.start + "-" + second.end }
+  }))).arrayBuffer();
+  assert.equal(accelerator.getStats().prefetchHits, 0, "no-store must not consume extension cache");
+  assert.equal(fixture.calls.length, 2, "no-store must not prefetch extra requests");
+}
+
+async function testClearCachesRejectsLatePrefetchResult() {
+  var release;
+  var gate = new Promise(function (resolve) { release = resolve; });
+  var started;
+  var prefetchStarted = new Promise(function (resolve) { started = resolve; });
+  var nextStart;
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      if (range.start === nextStart) { started(); await gate; }
+      return new Response(media.slice(range.start, range.end + 1), {
+        status: 206, headers: { "content-range": "bytes " + range.start + "-" + range.end + "/" + media.length }
+      });
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/clear-cache";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  nextStart = index.segments[1].start;
+  var first = index.segments[0];
+  await (await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  await prefetchStarted;
+  accelerator.clearCaches();
+  release();
+  await delay(30);
+  assert.equal(accelerator.getStats().prefetch.cacheEntries, 0, "cleared cache must reject late results");
+}
+
+async function testDisableCancelsScheduledPrefetch() {
+  var fixture = makeFixture({ delayMs: 5 });
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: fixture.fetch,
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 100 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/disable-prefetch";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  var first = index.segments[0];
+  await (await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  accelerator.updateConfig({ prefetchEnabled: false });
+  await delay(150);
+  assert.equal(fixture.calls.length, 1, "disabled prefetch must not start delayed work");
+}
+
+async function testPrefetchRespectsGlobalConcurrency() {
+  var active = 0;
+  var peak = 0;
+  var release;
+  var gate = new Promise(function (resolve) { release = resolve; });
+  var nextStart;
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      if (range.start === nextStart) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+      }
+      return new Response(media.slice(range.start, range.end + 1), {
+        status: 206, headers: { "content-range": "bytes " + range.start + "-" + range.end + "/" + media.length }
+      });
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0, globalConcurrency: 1 })
+  });
+  var urls = ["https://v3-web-prime.douyinvod.com/video/concurrency-a", "https://v3-web-prime.douyinvod.com/video/concurrency-b"];
+  var index = accelerator.observeMediaIndex(urls[0], "bytes=0-63", new Uint8Array(makeSidx()));
+  accelerator.observeMediaIndex(urls[1], "bytes=0-63", new Uint8Array(makeSidx()));
+  nextStart = index.segments[1].start;
+  var first = index.segments[0];
+  for (var url of urls) {
+    await (await accelerator.fetch(new Request(url, {
+      headers: { Range: "bytes=" + first.start + "-" + first.end }
+    }))).arrayBuffer();
+  }
+  await delay(30);
+  release();
+  await delay(30);
+  assert.equal(peak, 1, "prefetches must share the global concurrency limit");
+}
+
+async function testPrefetchTimesOut() {
+  var nextStart;
+  var aborted = false;
+  var accelerator = acceleratorApi.createFetchAccelerator({
+    nativeFetch: async function (request) {
+      var range = core.parseRangeHeader(request.headers.get("range"));
+      if (range.start === nextStart) {
+        await new Promise(function (resolve, reject) {
+          request.signal.addEventListener("abort", function () {
+            aborted = true;
+            reject(request.signal.reason);
+          }, { once: true });
+        });
+      }
+      return new Response(media.slice(range.start, range.end + 1), {
+        status: 206, headers: { "content-range": "bytes " + range.start + "-" + range.end + "/" + media.length }
+      });
+    },
+    config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0, timeoutMs: 1000 })
+  });
+  var url = "https://v3-web-prime.douyinvod.com/video/prefetch-timeout";
+  var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+  nextStart = index.segments[1].start;
+  var first = index.segments[0];
+  await (await accelerator.fetch(new Request(url, {
+    headers: { Range: "bytes=" + first.start + "-" + first.end }
+  }))).arrayBuffer();
+  await delay(1200);
+  assert.equal(aborted, true, "stalled prefetch should be aborted by timeout");
+  assert.equal(accelerator.getStats().prefetch.inflight, 0);
+  assert.equal(accelerator.getStats().semaphore.active, 0);
+}
+
+async function testUnsafePrefetchResponsesAreNotCached() {
+  for (var kind of ["encoding", "unknown-total", "response-no-store"]) {
+    var nextStart;
+    var nextCalls = 0;
+    var accelerator = acceleratorApi.createFetchAccelerator({
+      nativeFetch: async function (request) {
+        var range = core.parseRangeHeader(request.headers.get("range"));
+        if (range.start === nextStart) nextCalls += 1;
+        var headers = { "content-range": "bytes " + range.start + "-" + range.end + "/" +
+          (range.start === nextStart && kind === "unknown-total" ? "*" : media.length) };
+        if (range.start === nextStart && kind === "encoding") headers["content-encoding"] = "gzip";
+        if (range.start === nextStart && kind === "response-no-store") headers["cache-control"] = "no-store";
+        return new Response(media.slice(range.start, range.end + 1), { status: 206, headers: headers });
+      },
+      config: baseConfig({ prefetchEnabled: true, prefetchDelayMs: 0 })
+    });
+    var url = "https://v3-web-prime.douyinvod.com/video/unsafe-" + kind;
+    var index = accelerator.observeMediaIndex(url, "bytes=0-63", new Uint8Array(makeSidx()));
+    var first = index.segments[0];
+    var second = index.segments[1];
+    nextStart = second.start;
+    await (await accelerator.fetch(new Request(url, {
+      headers: { Range: "bytes=" + first.start + "-" + first.end }
+    }))).arrayBuffer();
+    await delay(30);
+    var response = await accelerator.fetch(new Request(url, {
+      headers: { Range: "bytes=" + second.start + "-" + second.end }
+    }));
+    await response.arrayBuffer();
+    assert.equal(nextCalls, 2, kind + " must fall back to a native demand request");
+    if (kind === "unknown-total") assert.ok(response.headers.get("content-range").endsWith("/*"));
+  }
 }
 
 async function testAdaptiveFastHostReturnsToNative() {
@@ -608,14 +904,44 @@ async function testAdaptiveSlowHostUsesThreeWay() {
   assert.ok(stats.adaptive3Way >= 1);
 }
 
+async function testZjcdnMediaAndUnrelatedTraffic() {
+  var fixture = makeFixture();
+  var accelerator = acceleratorApi.createFetchAccelerator({ nativeFetch: fixture.fetch, config: baseConfig() });
+  var prefix = "https://v5-dy-ov-experiment.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15c000-ce/id/";
+  var response = await accelerator.fetch(new Request(prefix + "media-video-hvc1/?a=6383", { headers: { Range: "bytes=0-799999" } }));
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), media.slice(0, 800000));
+  assert.equal(accelerator.getStats().accelerated, 1);
+  assert.equal(fixture.calls.length, 3);
+  await (await accelerator.fetch(new Request("https://v5-dy-ov-experiment.zjcdn.com/unrelated", { headers: { Range: "bytes=0-799999" } }))).arrayBuffer();
+  assert.equal(fixture.calls.length, 4);
+  assert.equal(accelerator.getStats().accelerated, 1);
+  var failing = makeFixture({ failSubranges: true, originalLength: 800000 });
+  var fallback = acceleratorApi.createFetchAccelerator({ nativeFetch: failing.fetch, config: baseConfig() });
+  var recovered = await fallback.fetch(new Request(prefix + "media-video-hvc1/?a=6383", { headers: { Range: "bytes=0-799999" } }));
+  assert.deepEqual(new Uint8Array(await recovered.arrayBuffer()), media.slice(0, 800000));
+  assert.equal(fallback.getStats().fallbacks, 1);
+  assert.ok(failing.calls.some(function (call) { return call.range.length === 800000; }));
+}
+
 (async function () {
+  await testZjcdnMediaAndUnrelatedTraffic();
   await testAcceleratedRange();
+  await testPostRequestBodyPassesThrough();
   await testSmallRangeBypasses();
   await testFailureFallsBackToOriginalRange();
   await testSiblingSubrangesAbortBeforeFallback();
   await testAbortDoesNotFallback();
   await testSidxNextSegmentPrefetchServesCache();
   await testObservedMediaIndexStartsPrefetch();
+  await testAbortWhileJoiningPrefetch();
+  await testPrefetchDoesNotCrossUrlVariants();
+  await testPrefetchDoesNotCrossRequestHeaders();
+  await testNoStoreRequestSkipsPrefetchCache();
+  await testClearCachesRejectsLatePrefetchResult();
+  await testDisableCancelsScheduledPrefetch();
+  await testPrefetchRespectsGlobalConcurrency();
+  await testPrefetchTimesOut();
+  await testUnsafePrefetchResponsesAreNotCached();
   await testAdaptiveFastHostReturnsToNative();
   await testAdaptiveSlowHostUsesTwoWayForMidSizedVideoRange();
   await testAdaptiveFastHostKeepsMidSizedVideoRangeNative();

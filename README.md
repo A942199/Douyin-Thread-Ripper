@@ -5,7 +5,7 @@ player and UI.
 
 ## Install
 
-Packaged build: [Douyin-Thread-Ripper-v0.2.3.zip](dist/Douyin-Thread-Ripper-v0.2.3.zip)
+Packaged build: [Douyin-Thread-Ripper-v0.2.7.zip](dist/Douyin-Thread-Ripper-v0.2.7.zip)
 
 For the packaged build, unzip it first, then load the extracted directory with
 Chrome's **Load unpacked** button. Chrome does not load this ZIP directly as an
@@ -21,7 +21,7 @@ The extension does not replace the Douyin player, fabricate media signatures, or
 require exported cookies. It accelerates eligible Range requests inside the
 existing logged-in browser session.
 
-## v0.2.3 architecture
+## v0.2.7 architecture
 
 Douyin feed metadata is observed from fetch or XHR and used to build a
 candidate registry from real url_list values only. No CDN hostname is invented.
@@ -60,6 +60,10 @@ SIDX path:
 - Any sub-range validation or network failure cancels sibling work and falls
   back to Douyin's original fetch.
 - Original AbortSignal is honored.
+- Prefetch entries are isolated by the full resource URL, request headers and
+  relevant fetch options. Requests requiring revalidation bypass prefetch.
+- Old SIDX indexes, CDN candidate groups and validation records are bounded;
+  evicted records fall back to normal observation and validation.
 - Runtime statistics never include signed query values or cookies.
 
 ## Adaptive defaults
@@ -128,8 +132,42 @@ The current suite covers CDN candidate isolation by representation, multi-point
 byte verification, adaptive Native/2-way/3-way decisions, abort/fallback
 semantics, SIDX parsing, and segment-prefetch cache behavior.
 
+An optional browser integration test uses Node.js 22 or later and an isolated
+Microsoft Edge profile; it loads the unpacked extension and exercises the page
+hook, byte-exact Range reconstruction and popup settings using intercepted
+fixture responses. It does not use the user's browser profile or real credentials.
+
+```powershell
+node dev/browser-smoke.js
+```
+
+Set `DTR_BROWSER` to another Chromium-based browser executable if needed. The
+browser must support loading unpacked extensions from the command line. Adding
+`--live` also attempts real Douyin playback; login or a verification challenge
+can prevent that optional check from completing.
+
+To test the ZIP's contents rather than the working tree, run
+`node dev/browser-smoke.js --package`. The test extracts the archive to a
+temporary directory, loads it with a disposable browser profile, and checks POST
+pass-through, byte-exact Range reconstruction, malformed-range fallback, CDN
+verification and rejection, SIDX prefetch from fetch and XHR, and popup
+configuration. The test requires `tar` to be available on PATH.
+
+For a controlled local comparison, run `node dev/http-benchmark.js`. It makes
+six alternating paired requests to a loopback server that independently limits
+each response's rate and checks the reconstructed bytes. Its timings describe
+that artificial setup only; they do not measure real Douyin performance.
+
 ## Current limitations
 
+- `douyinvod.com` and its subdomains are eligible for interception. On the
+  shared `zjcdn.com` network, only the observed hosts
+  `v5-dy-ov-experiment.zjcdn.com` and `v5-hl-mly-ov.zjcdn.com` and matching
+  Douyin media paths are eligible. Other hosts and paths pass through unchanged.
+  These two hosts use same-host splitting; they are not added to the alternate
+  CDN pool. Further Douyin CDN host or path variants may also pass through.
+  A playing video and a nonzero extension counter do not by themselves prove
+  that every media request for that video was accelerated.
 - Multi-CDN selection only activates when Douyin actually exposes distinct,
   equivalent media CDN candidates that pass byte verification.
 - The extension does not invent alternate CDN domains or generate Douyin

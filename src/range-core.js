@@ -175,6 +175,19 @@
     return host === "douyinvod.com" || host.endsWith(".douyinvod.com");
   }
 
+  function isDouyinMediaUrl(value) {
+    try {
+      var url = new URL(value);
+      if (url.protocol !== "https:") return false;
+      if (isDouyinVodHost(url.hostname)) return true;
+      var host = url.hostname.toLowerCase();
+      if (host !== "v5-dy-ov-experiment.zjcdn.com" && host !== "v5-hl-mly-ov.zjcdn.com") return false;
+      return /^\/[a-z0-9]+\/[a-z0-9]+\/video\/tos\/cn\/tos-cn-ve-(?:15|15c000-ce)\/[a-z0-9]+\/media-(?:video|audio)-[a-z0-9-]+\/$/i.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
   function sanitizeUrl(value) {
     try {
       var url = new URL(value);
@@ -211,6 +224,7 @@
     choosePieceCount: choosePieceCount,
     concatUint8Arrays: concatUint8Arrays,
     isDouyinVodHost: isDouyinVodHost,
+    isDouyinMediaUrl: isDouyinMediaUrl,
     sanitizeUrl: sanitizeUrl,
     validatePiece: validatePiece
   });

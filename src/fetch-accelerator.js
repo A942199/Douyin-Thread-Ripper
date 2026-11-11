@@ -21,7 +21,7 @@
     throw new Error("DTR RangeCore, CdnResolver and SegmentPrefetch are required");
   }
 
-  var VERSION = "0.2.3";
+  var VERSION = "0.2.7";
 
   var DEFAULT_CONFIG = Object.freeze({
     enabled: true,
@@ -313,10 +313,30 @@
 
   function resourceKey(urlValue) {
     try {
-      return new URL(urlValue).pathname;
+      var url = new URL(urlValue);
+      url.hash = "";
+      return url.href;
     } catch (_) {
       return "";
     }
+  }
+
+  function prefetchKey(request) {
+    var headers = [];
+    request.headers.forEach(function (value, name) {
+      if (name.toLowerCase() !== "range") headers.push([name, value]);
+    });
+    return JSON.stringify([resourceKey(request.url), request.credentials, request.mode,
+      request.cache, request.redirect, request.referrer, request.referrerPolicy,
+      request.integrity, headers]);
+  }
+
+  function canUsePrefetch(request) {
+    var cacheControl = request.headers.get("cache-control") || "";
+    var pragma = request.headers.get("pragma") || "";
+    return ["no-store", "reload", "no-cache"].indexOf(request.cache) === -1 &&
+      !/(?:^|,)\s*(?:no-store|no-cache|max-age\s*=\s*0)(?:\s*(?:,|$))/i.test(cacheControl) &&
+      !/\bno-cache\b/i.test(pragma);
   }
 
   function copyRequestWithUrl(baseRequest, urlValue, headers, signal) {
@@ -448,7 +468,7 @@
         return null;
       }
 
-      if (!core.isDouyinVodHost(parsedUrl.hostname)) {
+      if (!core.isDouyinMediaUrl(parsedUrl.href)) {
         return null;
       }
 
@@ -804,12 +824,13 @@
     }
 
     function scheduleSegmentPrefetch(baseRequest, requestedRange) {
-      if (!config.prefetchEnabled || config.prefetchSegments < 1) {
+      if (!config.prefetchEnabled || config.prefetchSegments < 1 || !canUsePrefetch(baseRequest)) {
         return;
       }
 
-      var key = resourceKey(baseRequest.url);
-      var current = prefetch.matchSegment(key, requestedRange);
+      var indexKey = resourceKey(baseRequest.url);
+      var key = prefetchKey(baseRequest);
+      var current = prefetch.matchSegment(indexKey, requestedRange);
       if (!current) {
         return;
       }
@@ -817,7 +838,7 @@
       var generation = prefetch.noteDemand(key, current.index);
       prefetch.abortStale(key, current.index, config.prefetchSegments + 1);
 
-      var upcoming = prefetch.nextSegments(key, current.index, config.prefetchSegments);
+      var upcoming = prefetch.nextSegments(indexKey, current.index, config.prefetchSegments);
       upcoming.forEach(function (segment) {
         if (prefetch.has(key, segment)) {
           return;
@@ -828,6 +849,9 @@
         }
 
         setTimeout(function () {
+          if (!config.enabled || !config.prefetchEnabled || config.prefetchSegments < 1) {
+            return;
+          }
           if (!prefetch.isGenerationCurrent(key, generation)) {
             return;
           }
@@ -837,30 +861,43 @@
 
           var controller = new AbortController();
 
-          var promise = (async function () {
+          var promise = semaphore.run(async function () {
             var selectedUrl = config.multiCdnEnabled
               ? resolver.pickCandidate(baseRequest.url, segment.length, segment.index)
               : baseRequest.url;
             var headers = new Headers(baseRequest.headers);
             headers.set("Range", core.formatRange(segment.start, segment.end));
-            var request = copyRequestWithUrl(baseRequest, selectedUrl, headers, controller.signal);
+            var timed = createTimedSignal(controller.signal, config.timeoutMs);
             var started = now();
             var headersAt = started;
             resolver.beginRequest(selectedUrl);
 
             try {
+              var request = copyRequestWithUrl(baseRequest, selectedUrl, headers, timed.signal);
               var response = await nativeFetch(request);
               headersAt = now();
               if (response.status !== 206) {
                 throw new PieceHttpError(response.status);
               }
 
+              var encoding = response.headers.get("content-encoding");
+              if (encoding && encoding.toLowerCase() !== "identity") {
+                throw new Error("Encoded prefetch response is not safe to cache");
+              }
+              var cacheControl = response.headers.get("cache-control") || "";
+              if (/(?:^|,)\s*(?:no-store|no-cache|max-age\s*=\s*0)(?:\s*(?:,|$))/i.test(cacheControl)) {
+                throw new Error("Prefetch response requires revalidation");
+              }
               var contentRange = core.parseContentRange(response.headers.get("content-range"));
               var bytes = new Uint8Array(await response.arrayBuffer());
               var ended = now();
 
-              if (!core.validatePiece(segment, contentRange, bytes.byteLength)) {
+              if (!core.validatePiece(segment, contentRange, bytes.byteLength) || contentRange.total === null) {
                 throw new Error("Prefetch range validation failed");
+              }
+
+              if (timed.signal.aborted) {
+                throw createAbortError(timed.signal.reason);
               }
 
               resolver.observePlayableUrl(selectedUrl);
@@ -887,8 +924,9 @@
               throw error;
             } finally {
               resolver.endRequest(selectedUrl);
+              timed.cleanup();
             }
-          })();
+          }, controller.signal);
 
           prefetch.setInflight(key, segment, promise, controller);
         }, config.prefetchDelayMs);
@@ -896,11 +934,15 @@
     }
 
     async function maybeServePrefetch(baseRequest, requestedRange) {
-      if (!config.prefetchEnabled) {
+      if (!config.prefetchEnabled || !canUsePrefetch(baseRequest)) {
         return null;
       }
 
-      var key = resourceKey(baseRequest.url);
+      if (baseRequest.signal.aborted) {
+        throw createAbortError(baseRequest.signal.reason);
+      }
+
+      var key = prefetchKey(baseRequest);
       var cached = prefetch.take(key, requestedRange);
       if (cached) {
         stats.prefetchHits += 1;
@@ -919,9 +961,15 @@
 
       var timedOut = false;
       var timer;
+      var onAbort;
       try {
         var result = await Promise.race([
           inflight.promise,
+          new Promise(function (resolve) {
+            onAbort = function () { resolve(null); };
+            baseRequest.signal.addEventListener("abort", onAbort, { once: true });
+            if (baseRequest.signal.aborted) onAbort();
+          }),
           new Promise(function (resolve) {
             timer = setTimeout(function () {
               timedOut = true;
@@ -934,7 +982,7 @@
           clearTimeout(timer);
         }
 
-        if (result) {
+        if (result && !baseRequest.signal.aborted) {
           var joined = prefetch.take(key, requestedRange);
           if (joined) {
             stats.prefetchHits += 1;
@@ -948,6 +996,12 @@
         if (timer) {
           clearTimeout(timer);
         }
+      } finally {
+        if (onAbort) baseRequest.signal.removeEventListener("abort", onAbort);
+      }
+
+      if (baseRequest.signal.aborted) {
+        throw createAbortError(baseRequest.signal.reason);
       }
 
       if (timedOut) {
@@ -1063,7 +1117,7 @@
       }
 
       if (baseRequest.method !== "GET") {
-        return nativeFetch(input, init);
+        return nativeFetch(baseRequest);
       }
 
       if (isMetadataUrl(baseRequest.url)) {
@@ -1083,7 +1137,14 @@
         return nativeFetch(baseRequest);
       }
 
-      if (!core.isDouyinVodHost(parsedUrl.hostname)) {
+      if (!core.isDouyinMediaUrl(parsedUrl.href)) {
+        return nativeFetch(baseRequest);
+      }
+
+      // Cached or split responses cannot preserve conditional request semantics.
+      if (["if-range", "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"].some(function (name) {
+        return baseRequest.headers.has(name);
+      })) {
         return nativeFetch(baseRequest);
       }
 
@@ -1094,7 +1155,7 @@
 
       stats.matchedRangeFetches += 1;
       resolver.observePlayableUrl(baseRequest.url);
-      touchActiveResource(resourceKey(baseRequest.url));
+      touchActiveResource(prefetchKey(baseRequest));
 
       if (config.multiCdnEnabled) {
         resolver.verifyAlternates(baseRequest.url).catch(function () {});
@@ -1169,6 +1230,9 @@
       updateConfig: function (nextConfig) {
         config = normalizeConfig(Object.assign({}, config, nextConfig || {}));
         semaphore.setLimit(config.globalConcurrency);
+        if (!config.enabled || !config.prefetchEnabled || config.prefetchSegments < 1) {
+          prefetch.clear();
+        }
         publish();
         return Object.assign({}, config);
       },

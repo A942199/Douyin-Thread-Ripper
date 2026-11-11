@@ -48,5 +48,12 @@ assert.deepEqual(Array.from(joined), [1, 2, 3, 4]);
 assert.equal(core.isDouyinVodHost("v3-web-prime.douyinvod.com"), true);
 assert.equal(core.isDouyinVodHost("douyinvod.com"), true);
 assert.equal(core.isDouyinVodHost("www.douyin.com"), false);
+assert.equal(core.isDouyinMediaUrl("https://v5-dy-ov-experiment.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15c000-ce/id/media-video-hvc1/?a=6383"), true);
+assert.equal(core.isDouyinMediaUrl("https://v5-hl-mly-ov.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15c000-ce/id/media-audio-und-mp4a/?a=6383"), true);
+assert.equal(core.isDouyinMediaUrl("https://v5-hl-mly-ov.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15/id/media-audio-und-mp4a/?a=6383"), true);
+assert.equal(core.isDouyinMediaUrl("https://v5-hl-mly-ov.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-other/id/media-audio-und-mp4a/?a=6383"), false);
+assert.equal(core.isDouyinMediaUrl("https://other.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15c000-ce/id/media-video-hvc1/"), false);
+assert.equal(core.isDouyinMediaUrl("https://v5-dy-ov-experiment.zjcdn.com/unrelated/media-video-hvc1/"), false);
+assert.equal(core.isDouyinMediaUrl("http://v5-dy-ov-experiment.zjcdn.com/abc/def/video/tos/cn/tos-cn-ve-15c000-ce/id/media-video-hvc1/"), false);
 
 console.log("range-core.test.js: ok");

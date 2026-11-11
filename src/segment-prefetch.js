@@ -33,6 +33,7 @@
     var opts = options || {};
     var maxCacheBytes = Math.max(1024 * 1024, Number(opts.maxCacheBytes) || 16 * 1024 * 1024);
     var ttlMs = Math.max(5000, Number(opts.ttlMs) || 30000);
+    var maxIndexes = Math.max(1, Math.min(128, Math.floor(Number(opts.maxIndexes) || 128)));
 
     var indexes = new Map();
     var cache = new Map();
@@ -97,17 +98,25 @@
       if (!parsed || !parsed.segments || !parsed.segments.length) {
         return null;
       }
+      indexes.delete(resourceKey);
       indexes.set(resourceKey, parsed);
+      while (indexes.size > maxIndexes) {
+        indexes.delete(indexes.keys().next().value);
+      }
       stats.indexesParsed += 1;
       return parsed;
     }
 
     function getIndex(resourceKey) {
-      return indexes.get(resourceKey) || null;
+      var parsed = indexes.get(resourceKey);
+      if (!parsed) return null;
+      indexes.delete(resourceKey);
+      indexes.set(resourceKey, parsed);
+      return parsed;
     }
 
     function matchSegment(resourceKey, range) {
-      var parsed = indexes.get(resourceKey);
+      var parsed = getIndex(resourceKey);
       if (!parsed || !range) {
         return null;
       }
@@ -121,7 +130,7 @@
     }
 
     function nextSegments(resourceKey, currentIndex, count) {
-      var parsed = indexes.get(resourceKey);
+      var parsed = getIndex(resourceKey);
       if (!parsed) {
         return [];
       }
@@ -136,6 +145,7 @@
       var key = rangeKey(resourceKey, range);
       var previous = cache.get(key);
       if (previous) {
+        cache.delete(key);
         cacheBytes -= previous.bytes.byteLength;
       }
 
@@ -204,12 +214,15 @@
     }
 
     function noteDemand(resourceKey, segmentIndex) {
-      var previous = demandGenerations.get(resourceKey);
-      var generation = previous ? previous.generation + 1 : 1;
+      var generation = {};
+      demandGenerations.delete(resourceKey);
       demandGenerations.set(resourceKey, {
         generation: generation,
         segmentIndex: segmentIndex
       });
+      while (demandGenerations.size > 256) {
+        demandGenerations.delete(demandGenerations.keys().next().value);
+      }
       return generation;
     }
 

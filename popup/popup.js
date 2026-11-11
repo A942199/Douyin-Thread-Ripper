@@ -129,7 +129,7 @@ function renderStats(record) {
   var prefetchStats = prefetch.stats || {};
 
   dot.classList.add("ok");
-  statusText.textContent = "运行中 · v" + String(stats.version || "0.2.3");
+  statusText.textContent = "运行中 · v" + String(stats.version || "0.2.7");
   document.getElementById("matched").textContent = String(stats.matchedRangeFetches || 0);
   document.getElementById("accelerated").textContent = String(stats.accelerated || 0);
   document.getElementById("strategies").textContent =
